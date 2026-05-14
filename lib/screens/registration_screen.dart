@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../constants/colors.dart';
 import '../constants/dimensions.dart';
 import '../utils/user_preferences.dart';
+import '../utils/validation.dart';
+import 'otp_verification_screen.dart';
 
 class RegistrationScreen extends StatefulWidget {
   const RegistrationScreen({super.key});
@@ -12,21 +14,30 @@ class RegistrationScreen extends StatefulWidget {
 
 class _RegistrationScreenState extends State<RegistrationScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _fullNameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _isLoading = false;
+  String _passwordStrength = 'No password';
 
   @override
   void dispose() {
-    _nameController.dispose();
+    _usernameController.dispose();
+    _fullNameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
     super.dispose();
+  }
+
+  void _updatePasswordStrength(String password) {
+    setState(() {
+      _passwordStrength = ValidationUtils.getPasswordStrength(password);
+    });
   }
 
   Future<void> _register() async {
@@ -35,33 +46,16 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         _isLoading = true;
       });
 
-      // Register user
-      bool success = await UserPreferences.registerUser(
-        name: _nameController.text.trim(),
-        email: _emailController.text.trim(),
-        password: _passwordController.text,
+      // Check if user already exists
+      bool userExists = await UserPreferences.isUserEmailExists(
+        _emailController.text.trim(),
       );
 
-      setState(() {
-        _isLoading = false;
-      });
+      if (userExists) {
+        setState(() {
+          _isLoading = false;
+        });
 
-      if (success) {
-        // Show success message
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Registration successful! Please login.'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 2),
-            ),
-          );
-
-          // Navigate back to login screen
-          Navigator.pop(context);
-        }
-      } else {
-        // Show error message
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -71,6 +65,51 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
             ),
           );
         }
+        return;
+      }
+
+      setState(() {
+        _isLoading = false;
+      });
+
+      // Navigate to OTP verification screen
+      if (mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => OTPVerificationScreen(
+              email: _emailController.text.trim(),
+              username: _usernameController.text.trim(),
+              password: _passwordController.text,
+              fullName: _fullNameController.text.trim(),
+              onVerificationComplete: (verified) async {
+                if (verified) {
+                  // Register user after OTP verification
+                  bool success = await UserPreferences.registerUser(
+                    username: _usernameController.text.trim(),
+                    name: _fullNameController.text.trim(),
+                    email: _emailController.text.trim(),
+                    password: _passwordController.text,
+                  );
+
+                  if (success && mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Registration successful! Please login.'),
+                        backgroundColor: Colors.green,
+                        duration: Duration(seconds: 2),
+                      ),
+                    );
+
+                    // Navigate back to login screen
+                    Navigator.pop(context);
+                    Navigator.pop(context);
+                  }
+                }
+              },
+            ),
+          ),
+        );
       }
     }
   }
@@ -109,9 +148,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     color: AppColors.textWhite,
                   ),
                 ),
-                
+
                 const SizedBox(height: AppDimensions.paddingLarge),
-                
+
                 // Title
                 const Text(
                   'Create Account',
@@ -121,9 +160,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     color: AppColors.textWhite,
                   ),
                 ),
-                
+
                 const SizedBox(height: 8),
-                
+
                 const Text(
                   'Register to get started',
                   style: TextStyle(
@@ -131,17 +170,19 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     color: AppColors.textGrey,
                   ),
                 ),
-                
-                const SizedBox(height: 40),
-                
-                // Name Field
+
+                const SizedBox(height: 30),
+
+                // Username Field
                 TextFormField(
-                  controller: _nameController,
+                  controller: _usernameController,
                   style: const TextStyle(color: AppColors.textWhite),
                   decoration: InputDecoration(
-                    labelText: 'Full Name',
+                    labelText: 'Username',
                     labelStyle: const TextStyle(color: AppColors.textGrey),
                     prefixIcon: const Icon(Icons.person, color: AppColors.primaryOrange),
+                    helperText: 'Must start with alphabet (a-z, A-Z)',
+                    helperStyle: const TextStyle(color: AppColors.textGrey, fontSize: 12),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
                       borderSide: const BorderSide(color: AppColors.textGrey),
@@ -159,19 +200,43 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                       borderSide: const BorderSide(color: Colors.red, width: 2),
                     ),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your name';
-                    }
-                    if (value.length < 3) {
-                      return 'Name must be at least 3 characters';
-                    }
-                    return null;
-                  },
+                  validator: ValidationUtils.validateUsername,
                 ),
-                
+
                 const SizedBox(height: AppDimensions.paddingLarge),
-                
+
+                // Full Name Field
+                TextFormField(
+                  controller: _fullNameController,
+                  style: const TextStyle(color: AppColors.textWhite),
+                  decoration: InputDecoration(
+                    labelText: 'Full Name',
+                    labelStyle: const TextStyle(color: AppColors.textGrey),
+                    prefixIcon: const Icon(Icons.person_outline, color: AppColors.primaryOrange),
+                    helperText: 'Only letters and spaces allowed',
+                    helperStyle: const TextStyle(color: AppColors.textGrey, fontSize: 12),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
+                      borderSide: const BorderSide(color: AppColors.textGrey),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
+                      borderSide: const BorderSide(color: AppColors.primaryOrange, width: 2),
+                    ),
+                    errorBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
+                      borderSide: const BorderSide(color: Colors.red),
+                    ),
+                    focusedErrorBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
+                      borderSide: const BorderSide(color: Colors.red, width: 2),
+                    ),
+                  ),
+                  validator: ValidationUtils.validateFullName,
+                ),
+
+                const SizedBox(height: AppDimensions.paddingLarge),
+
                 // Email Field
                 TextFormField(
                   controller: _emailController,
@@ -198,23 +263,16 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                       borderSide: const BorderSide(color: Colors.red, width: 2),
                     ),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your email';
-                    }
-                    if (!RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$').hasMatch(value)) {
-                      return 'Please enter a valid email';
-                    }
-                    return null;
-                  },
+                  validator: ValidationUtils.validateEmail,
                 ),
-                
+
                 const SizedBox(height: AppDimensions.paddingLarge),
-                
+
                 // Password Field
                 TextFormField(
                   controller: _passwordController,
                   obscureText: _obscurePassword,
+                  onChanged: _updatePasswordStrength,
                   style: const TextStyle(color: AppColors.textWhite),
                   decoration: InputDecoration(
                     labelText: 'Password',
@@ -248,19 +306,51 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                       borderSide: const BorderSide(color: Colors.red, width: 2),
                     ),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter your password';
-                    }
-                    if (value.length < 6) {
-                      return 'Password must be at least 6 characters';
-                    }
-                    return null;
-                  },
+                  validator: ValidationUtils.validatePassword,
                 ),
-                
+
+                const SizedBox(height: 12),
+
+                // Password Strength Indicator
+                Row(
+                  children: [
+                    const Text(
+                      'Strength: ',
+                      style: TextStyle(color: AppColors.textGrey, fontSize: 12),
+                    ),
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: _passwordStrength == 'Weak'
+                              ? 0.33
+                              : _passwordStrength == 'Medium'
+                                  ? 0.66
+                                  : 1.0,
+                          minHeight: 6,
+                          backgroundColor: AppColors.textGrey.withOpacity(0.3),
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Color(ValidationUtils.getPasswordStrengthColor(
+                                _passwordController.text)),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _passwordStrength,
+                      style: TextStyle(
+                        color: Color(ValidationUtils.getPasswordStrengthColor(
+                            _passwordController.text)),
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+
                 const SizedBox(height: AppDimensions.paddingLarge),
-                
+
                 // Confirm Password Field
                 TextFormField(
                   controller: _confirmPasswordController,
@@ -298,24 +388,20 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                       borderSide: const BorderSide(color: Colors.red, width: 2),
                     ),
                   ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please confirm your password';
-                    }
-                    if (value != _passwordController.text) {
-                      return 'Passwords do not match';
-                    }
-                    return null;
-                  },
+                  validator: (value) => ValidationUtils.validatePasswordMatch(
+                    value,
+                    _passwordController.text,
+                  ),
                 ),
-                
+
                 const SizedBox(height: AppDimensions.paddingXLarge),
-                
+
                 // Register Button
                 ElevatedButton(
                   onPressed: _isLoading ? null : _register,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primaryOrange,
+                    disabledBackgroundColor: AppColors.primaryOrange.withOpacity(0.5),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(AppDimensions.radiusMedium),
@@ -331,7 +417,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                           ),
                         )
                       : const Text(
-                          'Register',
+                          'Continue to Verification',
                           style: TextStyle(
                             fontSize: AppDimensions.textLarge,
                             fontWeight: FontWeight.bold,
@@ -339,9 +425,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                           ),
                         ),
                 ),
-                
+
                 const SizedBox(height: AppDimensions.paddingLarge),
-                
+
                 // Login Link
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
