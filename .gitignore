@@ -1,5 +1,8 @@
-# Python / Flask Backend
+# Environments
 backend/.env
+.env
+
+# Python
 backend/__pycache__/
 backend/venv/
 backend/env/
@@ -15,10 +18,3 @@ backend/*.pyo
 # OS Specific
 .DS_Store
 Thumbs.db
-
-# The Flutter project has its own .gitignore in the smart_solar_advisor folder,
-# but we can add some global ignores here just in case.
-build/
-.dart_tool/
-.pub-cache/
-.pub/

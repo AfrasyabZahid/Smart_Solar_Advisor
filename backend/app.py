@@ -10,12 +10,16 @@ from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 from datetime import datetime
+from groq import Groq
 
 # Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here" else None
 
 # MongoDB setup
 MONGO_URI = os.getenv('MONGO_URI')
@@ -124,6 +128,46 @@ def send_otp():
         return jsonify({
             "success": False,
             "message": f"Failed to send OTP. Error: {str(e)}"
+        }), 500
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    if groq_client is None:
+        return jsonify({"success": False, "message": "Groq API key not configured"}), 500
+        
+    data = request.json
+    if not data or 'messages' not in data:
+        return jsonify({"success": False, "message": "Missing messages"}), 400
+        
+    user_messages = data['messages']
+    
+    # System prompt to give the AI context about the Smart Solar Advisor app
+    system_prompt = {
+        "role": "system",
+        "content": "You are the Smart Solar Advisor Chatbot. You help users understand their solar energy needs, calculate system sizes based on daily energy usage and roof area, and explain load shedding impact. Be helpful, concise, and friendly. Answer specifically about solar energy, panels, inverters, and the Smart Solar Advisor project. Do not answer completely unrelated queries."
+    }
+    
+    # Prepend the system prompt to the user's message history
+    messages = [system_prompt] + user_messages
+    
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant", # Updated model
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        
+        reply = completion.choices[0].message.content
+        return jsonify({
+            "success": True,
+            "reply": reply
+        }), 200
+    except Exception as e:
+        print(f"Error calling Groq API: {e}")
+        return jsonify({
+            "success": False,
+            "message": f"Error calling AI service: {str(e)}"
         }), 500
 
 @app.route('/api/check_email', methods=['POST'])
