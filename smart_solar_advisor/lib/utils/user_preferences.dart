@@ -36,6 +36,19 @@ class UserPreferences {
     }
   }
 
+  // Save user details (used by AuthService)
+  static Future<void> saveUser({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyUserName, name);
+    await prefs.setString(_keyUserEmail, email);
+    await prefs.setString(_keyUserPassword, password);
+    await prefs.setBool(_keyIsLoggedIn, true);
+  }
+
   // Check if user email already exists
   static Future<bool> isUserEmailExists(String email) async {
     try {

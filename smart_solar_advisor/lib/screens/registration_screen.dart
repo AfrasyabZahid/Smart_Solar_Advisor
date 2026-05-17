@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import '../constants/colors.dart';
 import '../constants/dimensions.dart';
-import '../utils/user_preferences.dart';
 import '../utils/validation.dart';
+import '../services/auth_service.dart';
 import 'otp_verification_screen.dart';
 
 class RegistrationScreen extends StatefulWidget {
@@ -46,12 +46,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         _isLoading = true;
       });
 
-      // Check if user already exists
-      bool userExists = await UserPreferences.isUserEmailExists(
-        _emailController.text.trim(),
+      // Check if user already exists via Backend API
+      final checkResult = await AuthService.checkEmail(
+        email: _emailController.text.trim(),
       );
 
-      if (userExists) {
+      if (checkResult['exists']) {
         setState(() {
           _isLoading = false;
         });
@@ -85,14 +85,13 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               onVerificationComplete: (verified) async {
                 if (verified) {
                   // Register user after OTP verification
-                  bool success = await UserPreferences.registerUser(
-                    username: _usernameController.text.trim(),
+                  final result = await AuthService.registerUser(
                     name: _fullNameController.text.trim(),
                     email: _emailController.text.trim(),
                     password: _passwordController.text,
                   );
 
-                  if (success && mounted) {
+                  if (result['success'] && mounted) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text('Registration successful! Please login.'),
@@ -104,6 +103,14 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     // Navigate back to login screen
                     Navigator.pop(context);
                     Navigator.pop(context);
+                  } else if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(result['message'] ?? 'Registration failed'),
+                        backgroundColor: Colors.red,
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
                   }
                 }
               },

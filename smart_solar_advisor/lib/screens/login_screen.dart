@@ -3,6 +3,7 @@ import '../constants/colors.dart';
 import '../constants/dimensions.dart';
 import '../constants/text_styles.dart';
 import '../utils/user_preferences.dart';
+import '../services/auth_service.dart';
 import 'registration_screen.dart';
 import 'main_screen.dart';
 
@@ -33,28 +34,8 @@ class _LoginScreenState extends State<LoginScreen> {
         _isLoading = true;
       });
 
-      // Check if user is registered first
-      bool isRegistered = await UserPreferences.isUserRegistered();
-      
-      if (!isRegistered) {
-        setState(() {
-          _isLoading = false;
-        });
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('No user found! Please register first.'),
-              backgroundColor: Colors.red,
-              duration: Duration(seconds: 2),
-            ),
-          );
-        }
-        return;
-      }
-
-      // Attempt login
-      bool success = await UserPreferences.loginUser(
+      // Attempt login via Backend API
+      final result = await AuthService.loginUser(
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
@@ -63,7 +44,7 @@ class _LoginScreenState extends State<LoginScreen> {
         _isLoading = false;
       });
 
-      if (success) {
+      if (result['success']) {
         // Navigate to main screen
         if (mounted) {
           Navigator.pushReplacement(
@@ -75,10 +56,10 @@ class _LoginScreenState extends State<LoginScreen> {
         // Show error message
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Invalid email or password!'),
+            SnackBar(
+              content: Text(result['message']),
               backgroundColor: Colors.red,
-              duration: Duration(seconds: 2),
+              duration: const Duration(seconds: 2),
             ),
           );
         }

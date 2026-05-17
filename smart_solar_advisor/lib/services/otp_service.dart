@@ -4,7 +4,7 @@ import 'dart:convert';
 
 class OTPService {
   // Backend API endpoint - change to your actual server URL
-  static const String _backendUrl = 'http://localhost:3000/api';
+  static const String _backendUrl = 'http://localhost:5000/api';
 
   // Generate 6-digit OTP (for verification purposes only)
   static String generateOTP() {
