@@ -2,16 +2,18 @@ import os
 import bcrypt
 import random
 import smtplib
-from bson import ObjectId
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from pymongo import MongoClient, DESCENDING
-from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 from datetime import datetime
 from groq import Groq
+import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.extras import RealDictCursor
+from contextlib import contextmanager
 
 # Load environment variables
 load_dotenv()
@@ -22,32 +24,80 @@ CORS(app)
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here" else None
 
-# MongoDB setup
-MONGO_URI = os.getenv('MONGO_URI')
-if MONGO_URI:
+# PostgreSQL Connection Pool setup
+DATABASE_URL = os.getenv('DATABASE_URL')
+db_pool = None
+
+if DATABASE_URL:
     try:
-        client = MongoClient(MONGO_URI)
-        db = client['smart_solar_db']
+        # Create a threaded connection pool (min 1, max 20 connections)
+        db_pool = ThreadedConnectionPool(1, 20, DATABASE_URL)
+        
+        # Test connection & verify tables
+        conn = db_pool.getconn()
+        cursor = conn.cursor()
+        
+        # Create necessary tables if they don't exist
+        cursor.execute("""
+        -- Users Table
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            email VARCHAR(150) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            city VARCHAR(100) DEFAULT '',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
 
-        # Collections
-        users_collection      = db['users']
-        calculations_collection = db['calculations']
-        chat_sessions_collection = db['chat_sessions']
-        activity_logs_collection  = db['activity_logs']
+        -- Solar System Calculations Table
+        CREATE TABLE IF NOT EXISTS calculations (
+            id SERIAL PRIMARY KEY,
+            user_email VARCHAR(150) NOT NULL,
+            energy_usage_kwh FLOAT NOT NULL,
+            rooftop_area_sqm FLOAT NOT NULL,
+            location VARCHAR(100) NOT NULL,
+            load_shedding_hours FLOAT NOT NULL,
+            system_size_kw FLOAT NOT NULL,
+            system_cost_pkr FLOAT NOT NULL,
+            calculated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
 
-        # Indexes
-        users_collection.create_index('email', unique=True)
-        calculations_collection.create_index([('user_email', 1), ('calculated_at', DESCENDING)])
-        chat_sessions_collection.create_index([('user_email', 1), ('session_started_at', DESCENDING)])
-        activity_logs_collection.create_index([('user_email', 1), ('timestamp', DESCENDING)])
+        -- AI Chat Sessions Table
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id SERIAL PRIMARY KEY,
+            user_email VARCHAR(150) NOT NULL,
+            messages JSONB NOT NULL,
+            session_started_at VARCHAR(100) NOT NULL,
+            session_ended_at VARCHAR(100) NOT NULL,
+            message_count INT NOT NULL,
+            saved_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
 
-        print("Connected to MongoDB successfully.")
+        -- User Activity Logs Table
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id SERIAL PRIMARY KEY,
+            user_email VARCHAR(150) NOT NULL,
+            action VARCHAR(100) NOT NULL,
+            details JSONB NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Indices
+        CREATE INDEX IF NOT EXISTS idx_calculations_email ON calculations (user_email);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_email ON chat_sessions (user_email);
+        CREATE INDEX IF NOT EXISTS idx_activity_logs_email ON activity_logs (user_email);
+        """)
+        conn.commit()
+        cursor.close()
+        db_pool.putconn(conn)
+        print("Connected to Supabase PostgreSQL and verified schemas successfully.")
     except Exception as e:
-        print(f"Error connecting to MongoDB: {e}")
-        db = None
+        print(f"Error connecting to PostgreSQL database: {e}")
+        db_pool = None
 else:
-    print("WARNING: MONGO_URI not found in environment variables. Database operations will fail.")
-    db = None
+    print("WARNING: DATABASE_URL not found in environment variables. Database operations will fail.")
+    db_pool = None
 
 # Email setup
 GMAIL_EMAIL    = os.getenv('GMAIL_EMAIL')
@@ -55,20 +105,45 @@ GMAIL_PASSWORD = os.getenv('GMAIL_PASSWORD')
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
+@contextmanager
+def get_db_cursor(commit=False):
+    """Context manager to lease a DB connection and return a dictionary cursor."""
+    conn = None
+    cursor = None
+    try:
+        if db_pool is None:
+            raise Exception("Database connection pool is not initialized.")
+        conn = db_pool.getconn()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        yield cursor
+        if commit:
+            conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        raise e
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            db_pool.putconn(conn)
+
 def generate_otp():
     return str(random.randint(100000, 999999))
 
 def _log_activity(user_email: str, action: str, details: dict = None):
     """Internal helper — silently log an activity event."""
-    if db is None:
+    if db_pool is None:
         return
     try:
-        activity_logs_collection.insert_one({
-            "user_email": user_email.lower(),
-            "action":     action,
-            "details":    details or {},
-            "timestamp":  datetime.utcnow(),
-        })
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO activity_logs (user_email, action, details)
+                VALUES (%s, %s, %s)
+                """,
+                (user_email.lower(), action, json.dumps(details or {}))
+            )
     except Exception:
         pass  # never let logging crash a real endpoint
 
@@ -76,7 +151,7 @@ def _log_activity(user_email: str, action: str, details: dict = None):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "ok", "db_connected": db is not None}), 200
+    return jsonify({"status": "ok", "db_connected": db_pool is not None}), 200
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
@@ -149,7 +224,7 @@ def send_otp():
 
 @app.route('/api/check_email', methods=['POST'])
 def check_email():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -157,13 +232,18 @@ def check_email():
         return jsonify({"success": False, "message": "Missing required fields"}), 400
 
     email = data['email'].lower()
-    user  = users_collection.find_one({"email": email})
-    return jsonify({"exists": user is not None}), 200
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT 1 FROM users WHERE email = %s LIMIT 1", (email,))
+            exists = cursor.fetchone() is not None
+            return jsonify({"exists": exists}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"Database error: {str(e)}"}), 500
 
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -174,34 +254,36 @@ def register():
     password = data['password']
     name     = data['name']
 
-    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-
-    user_doc = {
-        "name":       name,
-        "email":      email,
-        "password":   hashed_password,
-        "city":       "",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-    }
+    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
     try:
-        users_collection.insert_one(user_doc)
+        with get_db_cursor(commit=True) as cursor:
+            # Check unique email
+            cursor.execute("SELECT 1 FROM users WHERE email = %s LIMIT 1", (email,))
+            if cursor.fetchone():
+                return jsonify({"success": False, "message": "Email already exists"}), 409
+
+            cursor.execute(
+                """
+                INSERT INTO users (name, email, password, city)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (name, email, hashed_password, "")
+            )
+            
         _log_activity(email, 'registered')
         return jsonify({
             "success": True,
             "message": "User registered successfully",
             "user":    {"name": name, "email": email}
         }), 201
-    except DuplicateKeyError:
-        return jsonify({"success": False, "message": "Email already exists"}), 409
     except Exception as e:
         return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -211,19 +293,24 @@ def login():
     email    = data['email'].lower()
     password = data['password']
 
-    user = users_collection.find_one({"email": email})
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute("SELECT name, email, password, city FROM users WHERE email = %s LIMIT 1", (email,))
+            user = cursor.fetchone()
 
-    if user and bcrypt.checkpw(password.encode('utf-8'), user['password']):
-        _log_activity(email, 'login')
-        return jsonify({
-            "success": True,
-            "message": "Login successful",
-            "user": {
-                "name":  user['name'],
-                "email": user['email'],
-                "city":  user.get('city', ''),
-            }
-        }), 200
+        if user and bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+            _log_activity(email, 'login')
+            return jsonify({
+                "success": True,
+                "message": "Login successful",
+                "user": {
+                    "name":  user['name'],
+                    "email": user['email'],
+                    "city":  user.get('city', ''),
+                }
+            }), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
     return jsonify({"success": False, "message": "Invalid email or password"}), 401
 
@@ -240,7 +327,7 @@ def logout():
 
 @app.route('/api/update_profile', methods=['PUT'])
 def update_profile():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -248,30 +335,42 @@ def update_profile():
         return jsonify({"success": False, "message": "Email is required"}), 400
 
     email  = data['email'].lower()
-    fields = {}
+    fields = []
+    values = []
 
     if 'name' in data and data['name'].strip():
-        fields['name'] = data['name'].strip()
+        fields.append("name = %s")
+        values.append(data['name'].strip())
     if 'city' in data:
-        fields['city'] = data['city'].strip()
+        fields.append("city = %s")
+        values.append(data['city'].strip())
 
     if not fields:
         return jsonify({"success": False, "message": "Nothing to update"}), 400
 
-    fields['updated_at'] = datetime.utcnow()
+    fields.append("updated_at = %s")
+    values.append(datetime.utcnow())
+    values.append(email)
 
-    result = users_collection.update_one({"email": email}, {"$set": fields})
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            query = f"UPDATE users SET {', '.join(fields)} WHERE email = %s"
+            cursor.execute(query, tuple(values))
+            
+            # Check row count
+            cursor.execute("SELECT 1 FROM users WHERE email = %s LIMIT 1", (email,))
+            if not cursor.fetchone():
+                return jsonify({"success": False, "message": "User not found"}), 404
 
-    if result.matched_count == 0:
-        return jsonify({"success": False, "message": "User not found"}), 404
-
-    _log_activity(email, 'profile_updated', {"fields": list(fields.keys())})
-    return jsonify({"success": True, "message": "Profile updated successfully"}), 200
+        _log_activity(email, 'profile_updated', {"fields": [f.split(" = ")[0] for f in fields[:-1]]})
+        return jsonify({"success": True, "message": "Profile updated successfully"}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 
 @app.route('/api/change_password', methods=['PUT'])
 def change_password():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -285,26 +384,33 @@ def change_password():
     if len(new_password) < 6:
         return jsonify({"success": False, "message": "New password must be at least 6 characters"}), 400
 
-    user = users_collection.find_one({"email": email})
-    if not user:
-        return jsonify({"success": False, "message": "User not found"}), 404
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute("SELECT password FROM users WHERE email = %s LIMIT 1", (email,))
+            user = cursor.fetchone()
+            
+            if not user:
+                return jsonify({"success": False, "message": "User not found"}), 404
 
-    if not bcrypt.checkpw(current_password.encode('utf-8'), user['password']):
-        return jsonify({"success": False, "message": "Current password is incorrect"}), 401
+            if not bcrypt.checkpw(current_password.encode('utf-8'), user['password'].encode('utf-8')):
+                return jsonify({"success": False, "message": "Current password is incorrect"}), 401
 
-    new_hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
-    users_collection.update_one(
-        {"email": email},
-        {"$set": {"password": new_hashed, "updated_at": datetime.utcnow()}}
-    )
-    _log_activity(email, 'password_changed')
-    return jsonify({"success": True, "message": "Password changed successfully"}), 200
+            new_hashed = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            cursor.execute(
+                "UPDATE users SET password = %s, updated_at = %s WHERE email = %s",
+                (new_hashed, datetime.utcnow(), email)
+            )
+            
+        _log_activity(email, 'password_changed')
+        return jsonify({"success": True, "message": "Password changed successfully"}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 # ─── Calculator ───────────────────────────────────────────────────────────────
 
 @app.route('/api/save_calculation', methods=['POST'])
 def save_calculation():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -314,28 +420,37 @@ def save_calculation():
     if not data or not all(k in data for k in required):
         return jsonify({"success": False, "message": "Missing required fields"}), 400
 
-    doc = {
-        "user_email":          data['user_email'].lower(),
-        "energy_usage_kwh":    float(data['energy_usage_kwh']),
-        "rooftop_area_sqm":    float(data['rooftop_area_sqm']),
-        "location":            data['location'],
-        "load_shedding_hours": float(data['load_shedding_hours']),
-        "system_size_kw":      float(data['system_size_kw']),
-        "system_cost_pkr":     float(data['system_cost_pkr']),
-        "calculated_at":       datetime.utcnow(),
-    }
+    user_email          = data['user_email'].lower()
+    energy_usage_kwh    = float(data['energy_usage_kwh'])
+    rooftop_area_sqm    = float(data['rooftop_area_sqm'])
+    location            = data['location']
+    load_shedding_hours = float(data['load_shedding_hours'])
+    system_size_kw      = float(data['system_size_kw'])
+    system_cost_pkr     = float(data['system_cost_pkr'])
+    calculated_at       = datetime.utcnow()
 
-    calculations_collection.insert_one(doc)
-    _log_activity(data['user_email'], 'calculation_saved', {
-        "system_size_kw": doc['system_size_kw'],
-        "location":       doc['location'],
-    })
-    return jsonify({"success": True, "message": "Calculation saved"}), 201
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO calculations (user_email, energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (user_email, energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at)
+            )
+            
+        _log_activity(user_email, 'calculation_saved', {
+            "system_size_kw": system_size_kw,
+            "location":       location,
+        })
+        return jsonify({"success": True, "message": "Calculation saved"}), 201
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 
 @app.route('/api/get_calculations', methods=['GET'])
 def get_calculations():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     email = request.args.get('email', '').lower()
@@ -343,19 +458,29 @@ def get_calculations():
         return jsonify({"success": False, "message": "Email is required"}), 400
 
     limit = int(request.args.get('limit', 20))
-    docs  = list(
-        calculations_collection
-        .find({"user_email": email}, {"_id": 0})
-        .sort("calculated_at", DESCENDING)
-        .limit(limit)
-    )
 
-    # Convert datetime objects to ISO strings for JSON serialisation
-    for d in docs:
-        if 'calculated_at' in d:
-            d['calculated_at'] = d['calculated_at'].isoformat()
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at
+                FROM calculations
+                WHERE user_email = %s
+                ORDER BY calculated_at DESC
+                LIMIT %s
+                """,
+                (email, limit)
+            )
+            docs = cursor.fetchall()
 
-    return jsonify({"success": True, "calculations": docs}), 200
+        # Convert datetime objects to ISO strings for JSON serialisation
+        for d in docs:
+            if 'calculated_at' in d and d['calculated_at']:
+                d['calculated_at'] = d['calculated_at'].isoformat()
+
+        return jsonify({"success": True, "calculations": docs}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 # ─── Chat ─────────────────────────────────────────────────────────────────────
 
@@ -515,32 +640,41 @@ YOUR RULES
 
 @app.route('/api/save_chat', methods=['POST'])
 def save_chat():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
     if not data or 'user_email' not in data or 'messages' not in data:
         return jsonify({"success": False, "message": "Missing required fields"}), 400
 
-    doc = {
-        "user_email":          data['user_email'].lower(),
-        "messages":            data['messages'],
-        "session_started_at":  data.get('session_started_at', datetime.utcnow().isoformat()),
-        "session_ended_at":    datetime.utcnow().isoformat(),
-        "message_count":       len(data['messages']),
-        "saved_at":            datetime.utcnow(),
-    }
+    user_email         = data['user_email'].lower()
+    messages           = data['messages']
+    session_started_at = data.get('session_started_at', datetime.utcnow().isoformat())
+    session_ended_at   = datetime.utcnow().isoformat()
+    message_count      = len(messages)
+    saved_at           = datetime.utcnow()
 
-    chat_sessions_collection.insert_one(doc)
-    _log_activity(data['user_email'], 'chat_session_saved', {
-        "message_count": doc['message_count']
-    })
-    return jsonify({"success": True, "message": "Chat session saved"}), 201
+    try:
+        with get_db_cursor(commit=True) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO chat_sessions (user_email, messages, session_started_at, session_ended_at, message_count, saved_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (user_email, json.dumps(messages), session_started_at, session_ended_at, message_count, saved_at)
+            )
+            
+        _log_activity(user_email, 'chat_session_saved', {
+            "message_count": message_count
+        })
+        return jsonify({"success": True, "message": "Chat session saved"}), 201
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 
 @app.route('/api/get_chats', methods=['GET'])
 def get_chats():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     email = request.args.get('email', '').lower()
@@ -548,24 +682,34 @@ def get_chats():
         return jsonify({"success": False, "message": "Email is required"}), 400
 
     limit = int(request.args.get('limit', 10))
-    docs  = list(
-        chat_sessions_collection
-        .find({"user_email": email}, {"_id": 0})
-        .sort("saved_at", DESCENDING)
-        .limit(limit)
-    )
 
-    for d in docs:
-        if 'saved_at' in d and hasattr(d['saved_at'], 'isoformat'):
-            d['saved_at'] = d['saved_at'].isoformat()
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT messages, session_started_at, session_ended_at, message_count, saved_at
+                FROM chat_sessions
+                WHERE user_email = %s
+                ORDER BY saved_at DESC
+                LIMIT %s
+                """,
+                (email, limit)
+            )
+            docs = cursor.fetchall()
 
-    return jsonify({"success": True, "sessions": docs}), 200
+        for d in docs:
+            if 'saved_at' in d and d['saved_at']:
+                d['saved_at'] = d['saved_at'].isoformat()
+
+        return jsonify({"success": True, "sessions": docs}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 # ─── Activity Log ─────────────────────────────────────────────────────────────
 
 @app.route('/api/log_activity', methods=['POST'])
 def log_activity():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     data = request.json
@@ -578,7 +722,7 @@ def log_activity():
 
 @app.route('/api/get_activity', methods=['GET'])
 def get_activity():
-    if db is None:
+    if db_pool is None:
         return jsonify({"success": False, "message": "Database connection error"}), 500
 
     email = request.args.get('email', '').lower()
@@ -586,18 +730,28 @@ def get_activity():
         return jsonify({"success": False, "message": "Email is required"}), 400
 
     limit = int(request.args.get('limit', 20))
-    docs  = list(
-        activity_logs_collection
-        .find({"user_email": email}, {"_id": 0})
-        .sort("timestamp", DESCENDING)
-        .limit(limit)
-    )
 
-    for d in docs:
-        if 'timestamp' in d:
-            d['timestamp'] = d['timestamp'].isoformat()
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT action, details, timestamp
+                FROM activity_logs
+                WHERE user_email = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+                """,
+                (email, limit)
+            )
+            docs = cursor.fetchall()
 
-    return jsonify({"success": True, "activities": docs}), 200
+        for d in docs:
+            if 'timestamp' in d and d['timestamp']:
+                d['timestamp'] = d['timestamp'].isoformat()
+
+        return jsonify({"success": True, "activities": docs}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
