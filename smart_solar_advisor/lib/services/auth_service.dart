@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../utils/user_preferences.dart';
+import 'user_data_service.dart';
 
 class AuthService {
   // Use 10.0.2.2 for Android emulator, or localhost/127.0.0.1 for Web/iOS simulator.
@@ -85,7 +86,17 @@ class AuthService {
         await UserPreferences.saveUser(
           name: data['user']['name'],
           email: data['user']['email'],
-          password: password, // usually shouldn't save password locally, but maintaining existing flow
+          password: password,
+        );
+        // Also persist city returned from DB
+        final city = data['user']['city'] ?? '';
+        if (city.isNotEmpty) {
+          await UserPreferences.updateUserCity(city);
+        }
+        // Log login activity to MongoDB
+        await UserDataService.logActivity(
+          userEmail: email,
+          action: 'login',
         );
         return {'success': true, 'message': data['message']};
       } else {
@@ -94,6 +105,19 @@ class AuthService {
     } catch (e) {
       print('Error during login: $e');
       return {'success': false, 'message': 'Network error: Could not connect to backend'};
+    }
+  }
+
+  /// Call this on logout to notify the backend and log the activity.
+  static Future<void> logoutUser(String email) async {
+    try {
+      await http.post(
+        Uri.parse('$_baseUrl/logout'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': email}),
+      ).timeout(const Duration(seconds: 10));
+    } catch (e) {
+      print('Error during logout: $e');
     }
   }
 }

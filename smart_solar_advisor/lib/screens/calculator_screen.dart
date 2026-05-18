@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import '../constants/colors.dart';
 import '../constants/dimensions.dart';
-import '../constants/text_styles.dart';
 import '../widgets/custom_text_field.dart';
+import '../services/user_data_service.dart';
+import '../utils/user_preferences.dart';
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
@@ -19,6 +20,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   final _loadSheddingController = TextEditingController();
 
   bool _showResult = false;
+  bool _isSaving  = false;
   double _systemSize = 0.0;
   double _systemCost = 0.0;
 
@@ -31,7 +33,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     super.dispose();
   }
 
-  void _calculateSystem() {
+  Future<void> _calculateSystem() async {
     // Check if all fields are filled
     if (_energyUsageController.text.isEmpty ||
         _rooftopAreaController.text.isEmpty ||
@@ -49,11 +51,10 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
     // Validate form
     if (_formKey.currentState!.validate()) {
-      // Static calculation logic
-      double energyUsage = double.parse(_energyUsageController.text);
-      double rooftopArea = double.parse(_rooftopAreaController.text);
+      double energyUsage     = double.parse(_energyUsageController.text);
+      double rooftopArea     = double.parse(_rooftopAreaController.text);
+      double loadSheddingHrs = double.parse(_loadSheddingController.text);
 
-      // Simple calculation formula
       // System size = (Daily Energy Usage * 1.3) / 5
       _systemSize = (energyUsage * 1.3) / 5;
 
@@ -62,7 +63,36 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
       setState(() {
         _showResult = true;
+        _isSaving   = true;
       });
+
+      // ── Save to MongoDB ──────────────────────────────────────────
+      final email = await UserPreferences.getUserEmail();
+      if (email != null) {
+        final saved = await UserDataService.saveCalculation(
+          userEmail:          email,
+          energyUsageKwh:     energyUsage,
+          rooftopAreaSqm:     rooftopArea,
+          location:           _locationController.text.trim(),
+          loadSheddingHours:  loadSheddingHrs,
+          systemSizeKw:       _systemSize,
+          systemCostPkr:      _systemCost,
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(saved
+                  ? '✓ Calculation saved to your account'
+                  : 'Result calculated (could not save — check connection)'),
+              backgroundColor: saved ? Colors.green : Colors.orange,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+      }
+
+      setState(() => _isSaving = false);
     }
   }
 
@@ -222,7 +252,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
-                          onPressed: _calculateSystem,
+                          onPressed: _isSaving ? null : _calculateSystem,
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppColors.buttonBlue,
                             padding: const EdgeInsets.symmetric(vertical: 16),
@@ -231,24 +261,33 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                                   AppDimensions.radiusMedium),
                             ),
                           ),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const Text(
-                                'Calculate System Size',
-                                style: TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.textWhite,
+                          child: _isSaving
+                              ? const SizedBox(
+                                  height: 20,
+                                  width: 20,
+                                  child: CircularProgressIndicator(
+                                    color: AppColors.textWhite,
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Text(
+                                      'Calculate System Size',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                        color: AppColors.textWhite,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    const Icon(
+                                      Icons.arrow_forward,
+                                      color: AppColors.textWhite,
+                                    ),
+                                  ],
                                 ),
-                              ),
-                              const SizedBox(width: 8),
-                              const Icon(
-                                Icons.arrow_forward,
-                                color: AppColors.textWhite,
-                              ),
-                            ],
-                          ),
                         ),
                       ),
                     ],

@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import '../constants/colors.dart';
 import '../constants/dimensions.dart';
 import '../utils/user_preferences.dart';
-import '../widgets/custom_text_field.dart';
+import '../services/user_data_service.dart';
+import '../services/auth_service.dart';
 import 'login_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -80,26 +81,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           TextButton(
             onPressed: () async {
-              if (nameController.text.trim().isNotEmpty) {
-                final success = await UserPreferences.updateUserName(
-                  nameController.text.trim(),
+              final newName = nameController.text.trim();
+              if (newName.isNotEmpty) {
+                // Update locally
+                await UserPreferences.updateUserName(newName);
+                // Update in MongoDB
+                await UserDataService.updateProfile(
+                  email: _email,
+                  name: newName,
                 );
 
-                if (success) {
-                  setState(() {
-                    _fullName = nameController.text.trim();
-                  });
+                setState(() => _fullName = newName);
 
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Full name updated successfully!'),
-                        backgroundColor: Colors.green,
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                    Navigator.pop(context);
-                  }
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Full name updated successfully!'),
+                      backgroundColor: Colors.green,
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                  Navigator.pop(context);
                 }
               }
             },
@@ -153,26 +155,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           TextButton(
             onPressed: () async {
-              if (cityController.text.trim().isNotEmpty) {
-                final success = await UserPreferences.updateUserCity(
-                  cityController.text.trim(),
+              final newCity = cityController.text.trim();
+              if (newCity.isNotEmpty) {
+                // Update locally
+                await UserPreferences.updateUserCity(newCity);
+                // Update in MongoDB
+                await UserDataService.updateProfile(
+                  email: _email,
+                  city: newCity,
                 );
 
-                if (success) {
-                  setState(() {
-                    _city = cityController.text.trim();
-                  });
+                setState(() => _city = newCity);
 
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('City updated successfully!'),
-                        backgroundColor: Colors.green,
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                    Navigator.pop(context);
-                  }
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('City updated successfully!'),
+                      backgroundColor: Colors.green,
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                  Navigator.pop(context);
                 }
               }
             },
@@ -371,13 +374,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   return;
                 }
 
-                final success = await UserPreferences.changePassword(
+                // ── Validate via backend (bcrypt) ──
+                final result = await UserDataService.changePassword(
+                  email: _email,
                   currentPassword: currentPasswordController.text,
                   newPassword: newPasswordController.text,
                 );
 
                 if (mounted) {
-                  if (success) {
+                  if (result['success'] == true) {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text('Password changed successfully!'),
@@ -388,8 +393,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     Navigator.pop(context);
                   } else {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Current password is incorrect'),
+                      SnackBar(
+                        content: Text(result['message'] ?? 'Current password is incorrect'),
                         backgroundColor: Colors.red,
                       ),
                     );
@@ -430,6 +435,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           ),
           TextButton(
             onPressed: () async {
+              // Log logout event on server
+              await AuthService.logoutUser(_email);
               await UserPreferences.logoutUser();
               if (mounted) {
                 Navigator.pushReplacement(
