@@ -437,6 +437,12 @@ def _log_activity(user_email: str, action: str, details: dict = None):
     except Exception:
         pass  # never let logging crash a real endpoint
 
+# ─── Home ────────────────────────────────────────────────────────────────────
+
+@app.route('/', methods=['GET'])
+def home():
+    return "🚀 Smart Solar Advisor Backend is Running!", 200
+
 # ─── Health ──────────────────────────────────────────────────────────────────
 
 @app.route('/api/health', methods=['GET'])
