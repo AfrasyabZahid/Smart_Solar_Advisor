@@ -6,9 +6,9 @@ class ApiConstants {
   static const String localIp = '192.168.0.101';
   static const String port = '5000';
 
-  // If you deploy your backend to a public server (e.g., Render, Fly.io, Heroku),
-  // replace this with your public domain URL (e.g. 'https://my-backend.onrender.com/api').
-  static const String productionUrl = '';
+  // If you deploy your backend to a public server (e.g., Render, Fly.io, Railway),
+  // replace this with your public domain URL.
+  static const String productionUrl = 'https://smartsolaradvisor-production.up.railway.app/api';
 
   static String get baseUrl {
     if (productionUrl.isNotEmpty) {
