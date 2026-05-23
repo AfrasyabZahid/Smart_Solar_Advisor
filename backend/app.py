@@ -15,6 +15,253 @@ from psycopg2.pool import ThreadedConnectionPool
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 
+# ─── ML Models ───────────────────────────────────────────────────────────────
+import warnings as _warnings
+_warnings.filterwarnings('ignore', category=UserWarning)
+
+try:
+    import joblib
+    import numpy as np
+    import pandas as pd
+
+    _MODEL_DIR = os.path.join(os.path.dirname(__file__), 'models and notebook')
+    _size_model       = joblib.load(os.path.join(_MODEL_DIR, 'solar_size_model.pkl'))
+    _cost_model       = joblib.load(os.path.join(_MODEL_DIR, 'solar_cost_model.pkl'))
+    _segment_model    = joblib.load(os.path.join(_MODEL_DIR, 'solar_user_segmentation.pkl'))
+    _city_encoder     = joblib.load(os.path.join(_MODEL_DIR, 'city_encoder.pkl'))
+    _location_encoder = joblib.load(os.path.join(_MODEL_DIR, 'location_encoder.pkl'))
+    ML_READY = True
+    print('ML models loaded successfully.')
+except Exception as _ml_err:
+    ML_READY = False
+    print(f'WARNING: Could not load ML models ({_ml_err}). Falling back to formula.')
+
+
+# ── City metadata (trained city list from encoder) ───────────────────────────
+# Encoder classes: Bahawalpur, Hyderabad, Islamabad, Karachi, Lahore, Multan, Peshawar, Quetta
+# Location codes:  BWP, HYD, ISB, KHI, LHR, MUL, PEW, QTA
+_CITY_META = {
+    # city_lower -> (TitleCase, loc_code, sun_hours, irradiance, avg_temp_c)
+    'karachi':     ('Karachi',     'KHI', 6.0, 5.5, 28.0),
+    'hyderabad':   ('Hyderabad',   'HYD', 5.8, 5.3, 27.0),
+    'quetta':      ('Quetta',      'QTA', 6.2, 5.6, 18.0),
+    'lahore':      ('Lahore',      'LHR', 5.0, 4.8, 25.0),
+    'multan':      ('Multan',      'MUL', 5.2, 5.0, 27.0),
+    'islamabad':   ('Islamabad',   'ISB', 4.5, 4.3, 22.0),
+    'rawalpindi':  ('Islamabad',   'ISB', 4.5, 4.3, 22.0),   # nearest city
+    'peshawar':    ('Peshawar',    'PEW', 4.5, 4.3, 24.0),
+    'bahawalpur':  ('Bahawalpur',  'BWP', 5.3, 5.1, 28.0),
+    # fallback for unlisted cities → Lahore
+}
+_DEFAULT_META = ('Lahore', 'LHR', 5.0, 4.8, 25.0)
+
+_VENDORS_DB = {
+    'karachi': [
+        {'name': 'Sindh Solar Solutions', 'rating': 4.8, 'price_per_kw': 130000, 'phone': '021-111-222-333'},
+        {'name': 'Karachi Energy Co.', 'rating': 4.5, 'price_per_kw': 135000, 'phone': '021-444-555-666'},
+        {'name': 'Coastal Solar', 'rating': 4.2, 'price_per_kw': 140000, 'phone': '021-777-888-999'}
+    ],
+    'lahore': [
+        {'name': 'Punjab Solar Tech', 'rating': 4.9, 'price_per_kw': 125000, 'phone': '042-111-222-333'},
+        {'name': 'Lahore Green Energy', 'rating': 4.6, 'price_per_kw': 128000, 'phone': '042-444-555-666'},
+        {'name': 'Mughal Solar Systems', 'rating': 4.3, 'price_per_kw': 135000, 'phone': '042-777-888-999'}
+    ],
+    'islamabad': [
+        {'name': 'Capital Solar Experts', 'rating': 4.9, 'price_per_kw': 140000, 'phone': '051-111-222-333'},
+        {'name': 'Margalla Green Tech', 'rating': 4.7, 'price_per_kw': 145000, 'phone': '051-444-555-666'},
+        {'name': 'Twin City Solar', 'rating': 4.4, 'price_per_kw': 148000, 'phone': '051-777-888-999'}
+    ],
+    'multan': [
+        {'name': 'South Punjab Solar', 'rating': 4.6, 'price_per_kw': 120000, 'phone': '061-111-222-333'},
+        {'name': 'Multan Energy Solutions', 'rating': 4.5, 'price_per_kw': 122000, 'phone': '061-444-555-666'}
+    ],
+    'peshawar': [
+        {'name': 'KPK Solar Systems', 'rating': 4.7, 'price_per_kw': 135000, 'phone': '091-111-222-333'}
+    ],
+    'default': [
+        {'name': 'National Solar Providers', 'rating': 4.5, 'price_per_kw': 130000, 'phone': '0800-111-222'},
+        {'name': 'EcoPower Pakistan', 'rating': 4.4, 'price_per_kw': 135000, 'phone': '0800-444-555'}
+    ]
+}
+
+_SEGMENT_LABELS = ['Basic Saver', 'Moderate User', 'High Consumer', 'Commercial']
+_FEATURE_COLS   = [
+    'city_encoded', 'location_code_encoded',
+    'daily_energy_consumption_kwh', 'roof_area_sqm',
+    'load_shedding_hours', 'solar_irradiance_kwh_per_m2',
+    'sun_hours', 'avg_temp_c',
+]
+
+# Segmentation model feature set (from the pkl dict)
+_SEG_FEATURE_COLS = [
+    'Daily_Energy_Consumption_kWh', 'Monthly_Electricity_Bill_PKR',
+    'Monthly_Income_PKR', 'Load_Shedding_Hours', 'Avg_GHI_kWh_m2',
+]
+
+
+def _get_city_meta(city: str):
+    return _CITY_META.get(city.strip().lower(), _DEFAULT_META)
+
+
+def _encode_city(city_title: str) -> int:
+    try:
+        return int(_city_encoder.transform([city_title])[0])
+    except Exception:
+        return 4   # 'Lahore' index fallback
+
+
+def _encode_location(loc_code: str) -> int:
+    try:
+        return int(_location_encoder.transform([loc_code])[0])
+    except Exception:
+        return 4   # 'LHR' index fallback
+
+
+def _segment_user(energy_usage_kwh: float, load_shedding_hours: float,
+                  irradiance: float,
+                  monthly_bill: float = 0.0,
+                  monthly_income: float = 0.0,
+                  predicted_system_size: float = 0.0) -> tuple:
+    """Classifies user and returns dynamic recommendation."""
+    try:
+        # 1. Logical User Segmentation
+        if monthly_income < 100000:
+            if load_shedding_hours >= 6:
+                seg_name = 'Low-Income High-Burden Users'
+            else:
+                seg_name = 'Lower-Middle Income Users'
+        elif monthly_income >= 250000:
+            seg_name = 'High-Income Cost-Aware Users'
+        else:
+            seg_name = 'Middle-Income Balanced Users'
+
+        # 2. Dynamic Recommendation
+        # System Size Rule
+        if predicted_system_size > 0:
+            rec_size = f"{max(1, int(predicted_system_size))} - {int(predicted_system_size) + 2} kW"
+        else:
+            rec_size = f"{max(1, int(energy_usage_kwh / 4))} - {int((energy_usage_kwh / 4) + 2)} kW"
+
+        # Battery / System Type Rule
+        if load_shedding_hours >= 4:
+            sys_type = 'Hybrid'
+            if load_shedding_hours >= 8:
+                battery = 'Large Backup (Lithium-ion)'
+                advice = 'High load shedding requires a robust hybrid system with deep battery backup.'
+            else:
+                battery = 'Standard Backup'
+                advice = 'Hybrid system balances grid unreliability and solar savings.'
+        else:
+            if monthly_income >= 250000:
+                sys_type = 'Hybrid'
+                battery = 'Optional / Small Backup'
+                advice = 'Grid is stable, but a hybrid system offers premium energy independence.'
+            else:
+                sys_type = 'On-Grid'
+                battery = 'Not Required'
+                advice = 'On-grid system is highly recommended for maximum cost savings.'
+
+        rec = {
+            'System_Type': sys_type,
+            'Recommended_Size_kW': rec_size,
+            'Battery': battery,
+            'Advice': advice
+        }
+
+        return seg_name, rec
+    except Exception as exc:
+        print(f'Segmentation failed: {exc}')
+        return 'Moderate User', {}
+
+
+def _predict_solar(
+    energy_usage_kwh: float,
+    rooftop_area_sqm: float,
+    location: str,
+    load_shedding_hours: float,
+    monthly_electricity_bill_pkr: float = 0.0,
+    monthly_income_pkr: float = 0.0,
+) -> dict:
+    """
+    ML-powered prediction.
+    Returns system_size_kw, system_cost_pkr, daily_energy_gen_kwh,
+    feasibility_score (0-100), user_segment label.
+    """
+    city_title, loc_code, peak_sun, irradiance, avg_temp = _get_city_meta(location)
+
+    if ML_READY:
+        try:
+            city_enc = _encode_city(city_title)
+            loc_enc  = _encode_location(loc_code)
+
+            feat_df = pd.DataFrame([[
+                city_enc, loc_enc,
+                energy_usage_kwh, rooftop_area_sqm,
+                load_shedding_hours, irradiance,
+                peak_sun, avg_temp,
+            ]], columns=_FEATURE_COLS)
+
+            system_size_kw  = float(_size_model.predict(feat_df)[0])
+            system_cost_pkr = float(_cost_model.predict(feat_df)[0])
+
+            # Random Forest / XGBoost models cannot extrapolate beyond their max training value (~8.2kW).
+            # If usage exceeds the training ceiling (approx 30 kWh), extrapolate linearly 
+            # while retaining the ML model's baseline environmental variance.
+            if energy_usage_kwh > 30:
+                scale_factor = energy_usage_kwh / 30.0
+                system_size_kw  = system_size_kw * scale_factor
+                system_cost_pkr = system_cost_pkr * scale_factor
+        except Exception as exc:
+            print(f'ML predict failed ({exc}), using formula fallback.')
+            system_size_kw  = (energy_usage_kwh * 1.3) / peak_sun
+            system_cost_pkr = system_size_kw * 300_000
+
+        user_segment, recommendation = _segment_user(
+            energy_usage_kwh, load_shedding_hours, irradiance,
+            monthly_bill=monthly_electricity_bill_pkr,
+            monthly_income=monthly_income_pkr,
+            predicted_system_size=system_size_kw
+        )
+    else:
+        system_size_kw  = (energy_usage_kwh * 1.3) / peak_sun
+        system_cost_pkr = system_size_kw * 300_000
+        user_segment    = 'Moderate User'
+        recommendation  = {}
+
+    daily_energy_gen_kwh = round(system_size_kw * peak_sun, 2)
+
+    area_needed       = system_size_kw * 8
+    area_score        = min(rooftop_area_sqm / max(area_needed, 1), 1.0) * 40
+    shed_score        = min(load_shedding_hours / 12, 1.0) * 30
+    sun_score         = ((peak_sun - 3.5) / 3.0) * 30
+    feasibility_score = round(min(area_score + shed_score + sun_score, 100), 1)
+
+    # 3. Add Vendors
+    city_key = location.strip().lower()
+    if city_key == 'rawalpindi': city_key = 'islamabad'
+    
+    vendors = _VENDORS_DB.get(city_key, _VENDORS_DB['default'])
+    # Optional: Calculate estimated total cost from the vendor for this exact user
+    user_vendors = []
+    for v in vendors:
+        v_copy = v.copy()
+        v_copy['estimated_total_cost'] = round(v_copy['price_per_kw'] * system_size_kw, 0)
+        user_vendors.append(v_copy)
+    
+    recommendation['Vendors'] = user_vendors
+
+    return {
+        'system_size_kw':                round(max(system_size_kw, 0), 2),
+        'system_cost_pkr':               round(max(system_cost_pkr, 0), 0),
+        'daily_energy_gen_kwh':          daily_energy_gen_kwh,
+        'feasibility_score':             feasibility_score,
+        'user_segment':                  user_segment,
+        'peak_sun_hours':                peak_sun,
+        'recommendation':                recommendation,
+        'monthly_electricity_bill_pkr':  monthly_electricity_bill_pkr,
+        'monthly_income_pkr':            monthly_income_pkr,
+    }
+
 # Load environment variables
 load_dotenv()
 
@@ -58,10 +305,53 @@ if DATABASE_URL:
             rooftop_area_sqm FLOAT NOT NULL,
             location VARCHAR(100) NOT NULL,
             load_shedding_hours FLOAT NOT NULL,
+            monthly_electricity_bill_pkr FLOAT DEFAULT 0,
+            monthly_income_pkr FLOAT DEFAULT 0,
             system_size_kw FLOAT NOT NULL,
             system_cost_pkr FLOAT NOT NULL,
+            daily_energy_gen_kwh FLOAT DEFAULT 0,
+            feasibility_score FLOAT DEFAULT 0,
+            user_segment VARCHAR(100) DEFAULT '',
+            peak_sun_hours FLOAT DEFAULT 5.0,
+            recommendation JSONB DEFAULT '{}'::jsonb,
+            ml_used BOOLEAN DEFAULT FALSE,
             calculated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Recommendation History Table
+        CREATE TABLE IF NOT EXISTS recommendation_history (
+            id SERIAL PRIMARY KEY,
+            user_email VARCHAR(150) NOT NULL,
+            location VARCHAR(100) NOT NULL,
+            energy_usage_kwh FLOAT NOT NULL,
+            rooftop_area_sqm FLOAT NOT NULL,
+            load_shedding_hours FLOAT NOT NULL,
+            monthly_electricity_bill_pkr FLOAT DEFAULT 0,
+            monthly_income_pkr FLOAT DEFAULT 0,
+            system_size_kw FLOAT NOT NULL,
+            system_cost_pkr FLOAT NOT NULL,
+            daily_energy_gen_kwh FLOAT NOT NULL,
+            feasibility_score FLOAT NOT NULL,
+            user_segment VARCHAR(100) NOT NULL,
+            peak_sun_hours FLOAT NOT NULL,
+            recommendation JSONB DEFAULT '{}'::jsonb,
+            ml_used BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Patch existing tables: add new columns if they don't exist yet
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS monthly_electricity_bill_pkr FLOAT DEFAULT 0;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS monthly_income_pkr FLOAT DEFAULT 0;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS daily_energy_gen_kwh FLOAT DEFAULT 0;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS feasibility_score FLOAT DEFAULT 0;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS user_segment VARCHAR(100) DEFAULT '';
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS peak_sun_hours FLOAT DEFAULT 5.0;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS recommendation JSONB DEFAULT '{}'::jsonb;
+        ALTER TABLE calculations ADD COLUMN IF NOT EXISTS ml_used BOOLEAN DEFAULT FALSE;
+        ALTER TABLE recommendation_history ADD COLUMN IF NOT EXISTS monthly_electricity_bill_pkr FLOAT DEFAULT 0;
+        ALTER TABLE recommendation_history ADD COLUMN IF NOT EXISTS monthly_income_pkr FLOAT DEFAULT 0;
+        ALTER TABLE recommendation_history ADD COLUMN IF NOT EXISTS recommendation JSONB DEFAULT '{}'::jsonb;
+        CREATE INDEX IF NOT EXISTS idx_rec_history_email ON recommendation_history (user_email);
 
         -- AI Chat Sessions Table
         CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -406,19 +696,46 @@ def change_password():
     except Exception as e:
         return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
-# ─── Calculator ───────────────────────────────────────────────────────────────
+# ─── Predict (ML-powered) ───────────────────────────────────────────────────────────────
+
+@app.route('/api/predict', methods=['POST'])
+def predict():
+    data = request.json
+    required = ['energy_usage_kwh', 'rooftop_area_sqm', 'location', 'load_shedding_hours',
+                'monthly_electricity_bill_pkr', 'monthly_income_pkr']
+    if not data or not all(k in data for k in required):
+        return jsonify({'success': False, 'message': 'Missing required fields'}), 400
+
+    try:
+        result = _predict_solar(
+            energy_usage_kwh             = float(data['energy_usage_kwh']),
+            rooftop_area_sqm             = float(data['rooftop_area_sqm']),
+            location                     = data['location'],
+            load_shedding_hours          = float(data['load_shedding_hours']),
+            monthly_electricity_bill_pkr = float(data.get('monthly_electricity_bill_pkr', 0)),
+            monthly_income_pkr           = float(data.get('monthly_income_pkr', 0)),
+        )
+        result['ml_used'] = ML_READY
+        result['success'] = True
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+# ─── Calculator (save / fetch) ───────────────────────────────────────────────────────────────
 
 @app.route('/api/save_calculation', methods=['POST'])
 def save_calculation():
     if db_pool is None:
-        return jsonify({"success": False, "message": "Database connection error"}), 500
+        return jsonify({'success': False, 'message': 'Database connection error'}), 500
 
     data = request.json
     required = ['user_email', 'energy_usage_kwh', 'rooftop_area_sqm',
-                'location', 'load_shedding_hours', 'system_size_kw', 'system_cost_pkr']
+                'location', 'load_shedding_hours', 'monthly_electricity_bill_pkr', 'monthly_income_pkr',
+                'system_size_kw', 'system_cost_pkr']
 
     if not data or not all(k in data for k in required):
-        return jsonify({"success": False, "message": "Missing required fields"}), 400
+        return jsonify({'success': False, 'message': 'Missing required fields'}), 400
 
     user_email          = data['user_email'].lower()
     energy_usage_kwh    = float(data['energy_usage_kwh'])
@@ -427,35 +744,74 @@ def save_calculation():
     load_shedding_hours = float(data['load_shedding_hours'])
     system_size_kw      = float(data['system_size_kw'])
     system_cost_pkr     = float(data['system_cost_pkr'])
+    monthly_bill        = float(data.get('monthly_electricity_bill_pkr', 0))
+    monthly_income      = float(data.get('monthly_income_pkr', 0))
+    daily_energy_gen    = float(data.get('daily_energy_gen_kwh', 0))
+    feasibility_score   = float(data.get('feasibility_score', 0))
+    user_segment        = data.get('user_segment', '')
+    peak_sun_hours      = float(data.get('peak_sun_hours', 5.0))
+    recommendation      = data.get('recommendation', {})
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+    ml_used             = bool(data.get('ml_used', False))
     calculated_at       = datetime.utcnow()
+
+    import json
+    rec_json = json.dumps(recommendation)
 
     try:
         with get_db_cursor(commit=True) as cursor:
+            # Save to calculations table
             cursor.execute(
                 """
-                INSERT INTO calculations (user_email, energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO calculations
+                  (user_email, energy_usage_kwh, rooftop_area_sqm, location,
+                   load_shedding_hours, monthly_electricity_bill_pkr, monthly_income_pkr, system_size_kw, system_cost_pkr,
+                   daily_energy_gen_kwh, feasibility_score, user_segment,
+                   peak_sun_hours, recommendation, ml_used, calculated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """,
-                (user_email, energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at)
+                (user_email, energy_usage_kwh, rooftop_area_sqm, location,
+                 load_shedding_hours, monthly_bill, monthly_income, system_size_kw, system_cost_pkr,
+                 daily_energy_gen, feasibility_score, user_segment,
+                 peak_sun_hours, rec_json, ml_used, calculated_at)
             )
-            
+            # Also save to recommendation_history
+            cursor.execute(
+                """
+                INSERT INTO recommendation_history
+                  (user_email, location, energy_usage_kwh, rooftop_area_sqm,
+                   load_shedding_hours, monthly_electricity_bill_pkr, monthly_income_pkr, system_size_kw, system_cost_pkr,
+                   daily_energy_gen_kwh, feasibility_score, user_segment,
+                   peak_sun_hours, recommendation, ml_used)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (user_email, location, energy_usage_kwh, rooftop_area_sqm,
+                 load_shedding_hours, monthly_bill, monthly_income, system_size_kw, system_cost_pkr,
+                 daily_energy_gen, feasibility_score, user_segment,
+                 peak_sun_hours, rec_json, ml_used)
+            )
+
         _log_activity(user_email, 'calculation_saved', {
-            "system_size_kw": system_size_kw,
-            "location":       location,
+            'system_size_kw':    system_size_kw,
+            'location':          location,
+            'feasibility_score': feasibility_score,
+            'user_segment':      user_segment,
+            'ml_used':           ml_used,
         })
-        return jsonify({"success": True, "message": "Calculation saved"}), 201
+        return jsonify({'success': True, 'message': 'Calculation saved'}), 201
     except Exception as e:
-        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
+        return jsonify({'success': False, 'message': f'An error occurred: {str(e)}'}), 500
 
 
 @app.route('/api/get_calculations', methods=['GET'])
 def get_calculations():
     if db_pool is None:
-        return jsonify({"success": False, "message": "Database connection error"}), 500
+        return jsonify({'success': False, 'message': 'Database connection error'}), 500
 
     email = request.args.get('email', '').lower()
     if not email:
-        return jsonify({"success": False, "message": "Email is required"}), 400
+        return jsonify({'success': False, 'message': 'Email is required'}), 400
 
     limit = int(request.args.get('limit', 20))
 
@@ -463,7 +819,10 @@ def get_calculations():
         with get_db_cursor() as cursor:
             cursor.execute(
                 """
-                SELECT energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours, system_size_kw, system_cost_pkr, calculated_at
+                SELECT energy_usage_kwh, rooftop_area_sqm, location, load_shedding_hours,
+                       monthly_electricity_bill_pkr, monthly_income_pkr,
+                       system_size_kw, system_cost_pkr, daily_energy_gen_kwh,
+                       feasibility_score, user_segment, peak_sun_hours, recommendation, ml_used, calculated_at
                 FROM calculations
                 WHERE user_email = %s
                 ORDER BY calculated_at DESC
@@ -473,16 +832,53 @@ def get_calculations():
             )
             docs = cursor.fetchall()
 
-        # Convert datetime objects to ISO strings for JSON serialisation
         for d in docs:
             if 'calculated_at' in d and d['calculated_at']:
                 d['calculated_at'] = d['calculated_at'].isoformat()
 
-        return jsonify({"success": True, "calculations": docs}), 200
+        return jsonify({'success': True, 'calculations': docs}), 200
     except Exception as e:
-        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
+        return jsonify({'success': False, 'message': f'An error occurred: {str(e)}'}), 500
 
-# ─── Chat ─────────────────────────────────────────────────────────────────────
+
+# ─── Recommendation History ───────────────────────────────────────────────────────────────
+
+@app.route('/api/recommendation_history', methods=['GET'])
+def recommendation_history():
+    if db_pool is None:
+        return jsonify({'success': False, 'message': 'Database connection error'}), 500
+
+    email = request.args.get('email', '').lower()
+    if not email:
+        return jsonify({'success': False, 'message': 'Email is required'}), 400
+
+    limit = int(request.args.get('limit', 20))
+
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, location, energy_usage_kwh, rooftop_area_sqm,
+                       load_shedding_hours, monthly_electricity_bill_pkr, monthly_income_pkr,
+                       system_size_kw, system_cost_pkr,
+                       daily_energy_gen_kwh, feasibility_score, user_segment,
+                       peak_sun_hours, recommendation, ml_used, created_at
+                FROM recommendation_history
+                WHERE user_email = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (email, limit)
+            )
+            rows = cursor.fetchall()
+
+        for r in rows:
+            if r.get('created_at'):
+                r['created_at'] = r['created_at'].isoformat()
+
+        return jsonify({'success': True, 'history': rows}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'An error occurred: {str(e)}'}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -753,8 +1149,43 @@ def get_activity():
     except Exception as e:
         return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
 
+# ─── Vendors ──────────────────────────────────────────────────────────────────
+
+@app.route('/api/vendors', methods=['GET'])
+def get_vendors():
+    if db_pool is None:
+        return jsonify({"success": False, "message": "Database connection error"}), 500
+
+    try:
+        with get_db_cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, name, rating, reviews_count, starting_rate_per_kw, 
+                       locations, panel_brands, inverter_brands, years_of_experience, 
+                       provides_net_metering, tier_1_installer, contact_phone, 
+                       contact_email, office_address, bio
+                FROM vendors
+                ORDER BY rating DESC
+                """
+            )
+            rows = cursor.fetchall()
+
+        # Safely parse JSONB columns if returned as strings
+        for r in rows:
+            for field in ['locations', 'panel_brands', 'inverter_brands']:
+                if isinstance(r.get(field), str):
+                    try:
+                        r[field] = json.loads(r[field])
+                    except Exception:
+                        pass
+
+        return jsonify({"success": True, "vendors": rows}), 200
+    except Exception as e:
+        return jsonify({"success": False, "message": f"An error occurred: {str(e)}"}), 500
+
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+

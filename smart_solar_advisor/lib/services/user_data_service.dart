@@ -1,10 +1,47 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../constants/api_constants.dart';
 
 /// Handles all user-data persistence calls to the Flask backend.
 /// Every feature (calculator, chat, profile, activity) goes through here.
 class UserDataService {
-  static const String _baseUrl = 'http://localhost:5000/api';
+  static final String _baseUrl = ApiConstants.baseUrl;
+
+  // ── ML Prediction ──────────────────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>?> predictSolar({
+    required double energyUsageKwh,
+    required double rooftopAreaSqm,
+    required String location,
+    required double loadSheddingHours,
+    required double monthlyElectricityBillPkr,
+    required double monthlyIncomePkr,
+  }) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_baseUrl/predict'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'energy_usage_kwh':             energyUsageKwh,
+              'rooftop_area_sqm':             rooftopAreaSqm,
+              'location':                     location,
+              'load_shedding_hours':          loadSheddingHours,
+              'monthly_electricity_bill_pkr': monthlyElectricityBillPkr,
+              'monthly_income_pkr':           monthlyIncomePkr,
+            }),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        return Map<String, dynamic>.from(data);
+      }
+    } catch (e) {
+      print('Error calling predict: $e');
+    }
+    return null;
+  }
 
   // ── Calculator ─────────────────────────────────────────────────────────────
 
@@ -16,6 +53,14 @@ class UserDataService {
     required double loadSheddingHours,
     required double systemSizeKw,
     required double systemCostPkr,
+    required double monthlyElectricityBillPkr,
+    required double monthlyIncomePkr,
+    double dailyEnergyGenKwh = 0,
+    double feasibilityScore = 0,
+    String userSegment = '',
+    double peakSunHours = 5.0,
+    Map<String, dynamic> recommendation = const {},
+    bool mlUsed = false,
   }) async {
     try {
       final response = await http
@@ -23,13 +68,21 @@ class UserDataService {
             Uri.parse('$_baseUrl/save_calculation'),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'user_email': userEmail,
-              'energy_usage_kwh': energyUsageKwh,
-              'rooftop_area_sqm': rooftopAreaSqm,
-              'location': location,
-              'load_shedding_hours': loadSheddingHours,
-              'system_size_kw': systemSizeKw,
-              'system_cost_pkr': systemCostPkr,
+              'user_email':                   userEmail,
+              'energy_usage_kwh':             energyUsageKwh,
+              'rooftop_area_sqm':             rooftopAreaSqm,
+              'location':                     location,
+              'load_shedding_hours':          loadSheddingHours,
+              'system_size_kw':               systemSizeKw,
+              'system_cost_pkr':              systemCostPkr,
+              'monthly_electricity_bill_pkr': monthlyElectricityBillPkr,
+              'monthly_income_pkr':           monthlyIncomePkr,
+              'daily_energy_gen_kwh':         dailyEnergyGenKwh,
+              'feasibility_score':            feasibilityScore,
+              'user_segment':                 userSegment,
+              'peak_sun_hours':               peakSunHours,
+              'recommendation':               recommendation,
+              'ml_used':                      mlUsed,
             }),
           )
           .timeout(const Duration(seconds: 15));
@@ -59,6 +112,27 @@ class UserDataService {
       }
     } catch (e) {
       print('Error getting calculations: $e');
+    }
+    return [];
+  }
+
+  static Future<List<Map<String, dynamic>>> getRecommendationHistory(
+      String userEmail) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse(
+                '$_baseUrl/recommendation_history?email=${Uri.encodeComponent(userEmail)}&limit=20'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        return List<Map<String, dynamic>>.from(data['history']);
+      }
+    } catch (e) {
+      print('Error getting recommendation history: $e');
     }
     return [];
   }
@@ -221,4 +295,26 @@ class UserDataService {
     }
     return [];
   }
+
+  // ── Vendors ────────────────────────────────────────────────────────────────
+
+  static Future<List<Map<String, dynamic>>> getVendors() async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('$_baseUrl/vendors'),
+            headers: {'Content-Type': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body);
+      if (response.statusCode == 200 && data['success'] == true) {
+        return List<Map<String, dynamic>>.from(data['vendors']);
+      }
+    } catch (e) {
+      print('Error getting vendors: $e');
+    }
+    return [];
+  }
 }
+

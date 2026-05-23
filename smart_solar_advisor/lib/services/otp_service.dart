@@ -1,10 +1,11 @@
 import 'dart:math';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import '../constants/api_constants.dart';
 
 class OTPService {
-  // Backend API endpoint - change to your actual server URL
-  static const String _backendUrl = 'http://localhost:5000/api';
+  // Use centralized API constants configuration
+  static final String _backendUrl = ApiConstants.baseUrl;
 
   // Generate 6-digit OTP (for verification purposes only)
   static String generateOTP() {

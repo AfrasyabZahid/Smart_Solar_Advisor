@@ -153,6 +153,20 @@ print(f"Logged actions for this flow: {actions}")
 assert_check("Logged 'registered' action", "registered" in actions)
 assert_check("Logged 'login' action", "login" in actions)
 
+# 13. Get vendors
+print("\nTesting: GET /api/vendors")
+response = client.get('/api/vendors')
+assert_check("Get vendors status code is 200", response.status_code == 200)
+res_json = response.get_json()
+assert_check("Get vendors success flag", res_json.get('success') is True)
+vendors_list = res_json.get('vendors', [])
+assert_check("Seeded vendor count is exactly 200", len(vendors_list) == 200)
+first_v = vendors_list[0]
+assert_check("Vendor contains panel brands list", isinstance(first_v.get('panel_brands'), list))
+assert_check("Vendor contains starting rate", isinstance(first_v.get('starting_rate_per_kw'), (int, float)))
+print(f"Verified {len(vendors_list)} active seeded vendors from cloud database.")
+
+
 print("\n==================================================")
 print("     ALL API ENDPOINT CHECKS PASSED SUCCESSFULLY! ")
 print("==================================================")
@@ -160,3 +174,4 @@ print("==================================================")
 # Clean up DB pool
 if db_pool:
     db_pool.closeall()
+

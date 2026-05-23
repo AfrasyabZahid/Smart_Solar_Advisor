@@ -1,8 +1,9 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import '../constants/api_constants.dart';
 
 class ChatService {
-  static const String _baseUrl = 'http://localhost:5000/api';
+  static final String _baseUrl = ApiConstants.baseUrl;
 
   static Future<Map<String, dynamic>> sendMessage(List<Map<String, String>> messages) async {
     try {

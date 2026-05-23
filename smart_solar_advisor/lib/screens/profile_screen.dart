@@ -33,9 +33,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final city = await UserPreferences.getUserCity();
 
     setState(() {
-      _username = username ?? '';
       _fullName = fullName ?? '';
       _email = email ?? '';
+      
+      // Since username isn't saved in the backend on login, generate a fallback
+      if (username != null && username.isNotEmpty) {
+        _username = username;
+      } else if (_fullName.isNotEmpty) {
+        _username = _fullName.replaceAll(' ', '').toLowerCase();
+      } else if (_email.isNotEmpty) {
+        _username = _email.split('@')[0];
+      } else {
+        _username = 'user123';
+      }
+      
       _city = city ?? '';
       _isLoading = false;
     });
