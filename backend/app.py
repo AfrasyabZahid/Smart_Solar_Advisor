@@ -497,34 +497,33 @@ def send_otp():
       </html>
     """
 
-    # Use Resend HTTP API (works on Railway, no SMTP port needed)
-    RESEND_API_KEY = os.getenv('RESEND_API_KEY')
+    # Use Google Apps Script HTTP URL
+    GOOGLE_SCRIPT_URL = os.getenv('GOOGLE_SCRIPT_URL')
 
     try:
-        if RESEND_API_KEY:
+        if GOOGLE_SCRIPT_URL:
             import requests as req
             resp = req.post(
-                "https://api.resend.com/emails",
-                headers={
-                    "Authorization": f"Bearer {RESEND_API_KEY}",
-                    "Content-Type": "application/json"
-                },
+                GOOGLE_SCRIPT_URL,
+                headers={"Content-Type": "application/json"},
                 json={
-                    "from": "Smart Solar Advisor <onboarding@resend.dev>",
-                    "to": [email],
+                    "email": email,
                     "subject": "Verify Your Email - OTP Code",
                     "html": html_content
                 },
-                timeout=10
+                timeout=15
             )
-            if resp.status_code in [200, 201]:
-                print(f"OTP email sent via Resend to {email}")
+            
+            # Google Script returns a 302 redirect which requests handles automatically.
+            # We can check the final response text or just assume success if it didn't crash.
+            if "success" in resp.text.lower():
+                print(f"OTP email sent via Google Apps Script to {email}")
             else:
-                print(f"Resend API error: {resp.status_code} - {resp.text}")
+                print(f"Google Script response: {resp.status_code} - {resp.text}")
         else:
-            print("RESEND_API_KEY not set, skipping email delivery")
+            print("GOOGLE_SCRIPT_URL not set, skipping email delivery")
     except Exception as e:
-        print(f"Error sending OTP email: {e}")
+        print(f"Error sending OTP email via Google Script: {e}")
 
     # Always return success with the OTP so the app flow works
     return jsonify({
