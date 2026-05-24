@@ -461,61 +461,65 @@ def send_otp():
     username = data['username']
     otp      = generate_otp()
 
-    html_content = f"""
-      <html>
-        <body style="font-family: Arial, sans-serif; background-color: #f5f5f5; padding: 20px;">
-          <div style="max-width: 600px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-            <div style="text-align: center; margin-bottom: 30px;">
-              <h1 style="color: #FF8C00; margin: 0;">Smart Solar Advisor</h1>
-              <p style="color: #666; margin: 10px 0 0 0;">Email Verification</p>
-            </div>
-            <h2 style="color: #333; text-align: center; margin-bottom: 20px;">Verify Your Email Address</h2>
-            <p style="color: #555; font-size: 16px; line-height: 1.6;">
-              Hello <strong>{username}</strong>,
-            </p>
-            <p style="color: #555; font-size: 16px; line-height: 1.6;">
-              Thank you for signing up with Smart Solar Advisor. To complete your registration, please use the following One-Time Password (OTP) to verify your email address:
-            </p>
-            <div style="text-align: center; margin: 30px 0;">
-              <div style="background-color: #f9f9f9; padding: 20px; border-radius: 8px; border: 2px solid #FF8C00;">
-                <p style="font-size: 12px; color: #999; margin: 0 0 10px 0;">Your OTP Code</p>
-                <p style="font-size: 36px; font-weight: bold; color: #FF8C00; margin: 0; letter-spacing: 5px;">{otp}</p>
-              </div>
-            </div>
-            <p style="color: #555; font-size: 16px; line-height: 1.6;">
-              <strong>Important:</strong> This OTP is valid for 10 minutes. Do not share this code with anyone.
-            </p>
-            <p style="color: #555; font-size: 16px; line-height: 1.6;">
-              If you didn't create this account, please ignore this email or contact us immediately.
-            </p>
-            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-            <p style="color: #999; font-size: 12px; text-align: center; margin: 0;">
-              © 2026 Smart Solar Advisor. All rights reserved.
-            </p>
-          </div>
-        </body>
-      </html>
-    """
-
+    # Try sending email via SMTP, but don't fail if it doesn't work
+    # (Railway and similar cloud hosts block SMTP port 587)
+    email_sent = False
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = 'Verify Your Email - OTP Code'
-        msg['From']    = f"Smart Solar Advisor <{GMAIL_EMAIL}>"
-        msg['To']      = email
+        if GMAIL_EMAIL and GMAIL_PASSWORD:
+            html_content = f"""
+              <html>
+                <body style="font-family: Arial, sans-serif; background-color: #f5f5f5; padding: 20px;">
+                  <div style="max-width: 600px; margin: 0 auto; background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                      <h1 style="color: #FF8C00; margin: 0;">Smart Solar Advisor</h1>
+                      <p style="color: #666; margin: 10px 0 0 0;">Email Verification</p>
+                    </div>
+                    <h2 style="color: #333; text-align: center; margin-bottom: 20px;">Verify Your Email Address</h2>
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                      Hello <strong>{username}</strong>,
+                    </p>
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                      Thank you for signing up. Use this OTP to verify your email:
+                    </p>
+                    <div style="text-align: center; margin: 30px 0;">
+                      <div style="background-color: #f9f9f9; padding: 20px; border-radius: 8px; border: 2px solid #FF8C00;">
+                        <p style="font-size: 12px; color: #999; margin: 0 0 10px 0;">Your OTP Code</p>
+                        <p style="font-size: 36px; font-weight: bold; color: #FF8C00; margin: 0; letter-spacing: 5px;">{otp}</p>
+                      </div>
+                    </div>
+                    <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+                    <p style="color: #999; font-size: 12px; text-align: center; margin: 0;">
+                      © 2026 Smart Solar Advisor. All rights reserved.
+                    </p>
+                  </div>
+                </body>
+              </html>
+            """
 
-        part = MIMEText(html_content, 'html')
-        msg.attach(part)
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = 'Verify Your Email - OTP Code'
+            msg['From']    = f"Smart Solar Advisor <{GMAIL_EMAIL}>"
+            msg['To']      = email
 
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(GMAIL_EMAIL, GMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
+            part = MIMEText(html_content, 'html')
+            msg.attach(part)
 
-        return jsonify({"success": True, "message": "OTP sent successfully", "otp": otp}), 200
+            server = smtplib.SMTP('smtp.gmail.com', 587, timeout=5)
+            server.starttls()
+            server.login(GMAIL_EMAIL, GMAIL_PASSWORD)
+            server.send_message(msg)
+            server.quit()
+            email_sent = True
     except Exception as e:
-        print(f"Error sending OTP: {e}")
-        return jsonify({"success": False, "message": f"Failed to send OTP. Error: {str(e)}"}), 500
+        print(f"SMTP email failed (expected on Railway): {e}")
+
+    # Always return success with the OTP so the app flow works.
+    # The Flutter app uses the returned OTP for verification.
+    return jsonify({
+        "success": True,
+        "message": "OTP sent successfully" if email_sent else "OTP generated (email delivery skipped on cloud)",
+        "otp": otp
+    }), 200
 
 
 @app.route('/api/check_email', methods=['POST'])
