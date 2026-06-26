@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 class ChatService {
-  static const String _baseUrl = 'http://localhost:5000/api';
+  static const String _baseUrl = 'https://smart-solar-advisor.onrender.com/api';
 
   static Future<Map<String, dynamic>> sendMessage(List<Map<String, String>> messages) async {
     try {

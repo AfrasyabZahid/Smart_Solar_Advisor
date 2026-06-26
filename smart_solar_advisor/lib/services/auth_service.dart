@@ -6,7 +6,7 @@ class AuthService {
   // Use 10.0.2.2 for Android emulator, or localhost/127.0.0.1 for Web/iOS simulator.
   // Assuming the Python backend runs on port 5000.
   // Note: if you are testing on a real device, you need to use your machine's local IP address.
-  static const String _baseUrl = 'http://localhost:5000/api';
+  static const String _baseUrl = 'https://smart-solar-advisor.onrender.com/api';
 
   static Future<Map<String, dynamic>> checkEmail({required String email}) async {
     try {
